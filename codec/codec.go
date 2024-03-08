@@ -5,9 +5,9 @@ import (
 )
 
 type Header struct {
-	ServerMethod string // 服务端方法名
-	Seq          uint64 // 序列号
-	Err          string // 错误信息
+	ServiceMethod string // 服务端方法名
+	Seq           uint64 // 序列号
+	Err           string // 错误信息
 }
 
 type Codec interface {
