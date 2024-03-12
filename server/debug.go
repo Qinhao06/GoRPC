@@ -15,10 +15,10 @@ const debugText = `<html>
 	<hr>
 		<table>
 		<th align=center>Method</th><th align=center>Calls</th>
-		{{range $name, $mType := .Method}}
+		{{range $name, $mType := .Methods}}
 			<tr>
 			<td align=left font=fixed>{{$name}}({{$mType.ArgType}}, {{$mType.ReplyType}}) error</td>
-			<td align=center>{{$mType.NumCalls}}</td>
+			<td align=center>{{$mType.NumberCall}}</td>
 			</tr>
 		{{end}}
 		</table>

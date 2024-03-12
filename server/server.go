@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -233,10 +235,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) HandleHttp() {
-	http.Handle(codec.DefaultRpcPath, s)
-	log.Println("rpc server defaultRpcPath:", codec.DefaultRpcPath)
-	http.Handle(codec.DefaultDebugPath, debugHttp{s})
-	log.Println("rpc server debug path:", codec.DefaultDebugPath)
+	itoa := strconv.Itoa(rand.Intn(10))
+	http.Handle(codec.DefaultRpcPath+"/"+itoa, s)
+	log.Println("rpc server defaultRpcPath:", codec.DefaultRpcPath, itoa)
+	http.Handle(codec.DefaultDebugPath+"/"+itoa, debugHttp{s})
+	log.Printf("rpc server %p debug path: %s\n", s, codec.DefaultDebugPath+"/"+itoa)
 }
 
 func HandleHTTP() {

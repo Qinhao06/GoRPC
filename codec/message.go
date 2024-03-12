@@ -31,5 +31,5 @@ var DefaultOption = Option{
 const (
 	Connected        = "200 Connected to GoRpc"
 	DefaultRpcPath   = "/_goRPC_"
-	DefaultDebugPath = "/GoRpc/debug"
+	DefaultDebugPath = "/goRpc/debug"
 )

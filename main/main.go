@@ -29,11 +29,12 @@ func startRegistry(wg *sync.WaitGroup) {
 	_ = http.Serve(l, nil)
 }
 
-func startServer(registryAddr string, wg *sync.WaitGroup) {
+func startServer(registryAddr string, wg *sync.WaitGroup, port string) {
 	var foo Foo
-	l, _ := net.Listen("tcp", ":0")
+	l, _ := net.Listen("tcp", ":"+port)
 	ser := server.NewServer()
 	_ = ser.Register(&foo)
+	log.Printf("server %p listen on %s\n", ser, l.Addr().String())
 	registry.HeartBeat(registryAddr, "tcp@"+l.Addr().String(), 0)
 	wg.Done()
 	ser.Accept(l)
@@ -105,11 +106,12 @@ func main() {
 
 	time.Sleep(time.Second)
 	wg.Add(2)
-	go startServer(registryAddr, &wg)
-	go startServer(registryAddr, &wg)
+	go startServer(registryAddr, &wg, "9998")
+	go startServer(registryAddr, &wg, "9997")
 	wg.Wait()
 
 	time.Sleep(time.Second * 2)
 	call(registryAddr)
 	broadcast(registryAddr)
+
 }

@@ -10,15 +10,15 @@ import (
 )
 
 type MethodType struct {
-	method      reflect.Method
-	ArgType     reflect.Type
-	ReplyType   reflect.Type
-	numberCalls uint64
-	mu          *sync.Mutex
+	method     reflect.Method
+	ArgType    reflect.Type
+	ReplyType  reflect.Type
+	NumberCall uint64
+	mu         *sync.Mutex
 }
 
 func (m *MethodType) NumberCalls() uint64 {
-	return atomic.LoadUint64(&m.numberCalls)
+	return atomic.LoadUint64(&m.NumberCall)
 }
 
 func (m *MethodType) NewArgv() reflect.Value {
@@ -87,7 +87,7 @@ func (s *Service) registerMethods() {
 func (s *Service) Call(m *MethodType, argv reflect.Value, replyv reflect.Value) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	atomic.AddUint64(&m.numberCalls, 1)
+	atomic.AddUint64(&m.NumberCall, 1)
 	f := m.method.Func
 	callReturns := f.Call([]reflect.Value{s.Rcvr, argv, replyv})
 	log.Println(fmt.Sprintf("Service %p call Service: %s.%s", s, s.Name, m.method.Name))
