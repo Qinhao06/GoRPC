@@ -60,3 +60,5 @@ func NewGobCodec(conn io.ReadWriteCloser) Codec {
 		enc:  gob.NewEncoder(buf),
 	}
 }
+
+var _ Codec = (*GobCodec)(nil)

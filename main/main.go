@@ -2,9 +2,13 @@ package main
 
 import (
 	"GoRpc/client"
+	"GoRpc/registry"
 	"GoRpc/server"
+	"context"
+	_ "fmt"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -18,50 +22,94 @@ func (f Foo) Sum(args Args, reply *int) error {
 	return nil
 }
 
-func startServer(addr chan string) {
-	// pick a free port
+func startRegistry(wg *sync.WaitGroup) {
+	l, _ := net.Listen("tcp", ":9999")
+	registry.HandleHttp()
+	wg.Done()
+	_ = http.Serve(l, nil)
+}
+
+func startServer(registryAddr string, wg *sync.WaitGroup) {
 	var foo Foo
-	if err := server.Register(&foo); err != nil {
-		log.Fatal("service register error:", err)
+	l, _ := net.Listen("tcp", ":0")
+	ser := server.NewServer()
+	_ = ser.Register(&foo)
+	registry.HeartBeat(registryAddr, "tcp@"+l.Addr().String(), 0)
+	wg.Done()
+	ser.Accept(l)
+}
+
+func (f Foo) Sleep(args Args, reply *int) error {
+	time.Sleep(time.Second * time.Duration(args.Num1))
+	*reply = args.Num1 + args.Num2
+	return nil
+}
+
+func foo(xc *client.XClient, ctx context.Context, typ, serviceMethod string, args *Args) {
+	var reply int
+	var err error
+	switch typ {
+	case "call":
+		err = xc.Call(ctx, serviceMethod, args, &reply)
+	case "broadcast":
+		err = xc.Broadcast(ctx, serviceMethod, args, &reply)
 	}
-	l, err := net.Listen("tcp", ":0")
 	if err != nil {
-		log.Fatal("network error:", err)
+		log.Printf("%s %s error: %v", typ, serviceMethod, err)
+	} else {
+		log.Printf("%s %s success: %d + %d = %d", typ, serviceMethod, args.Num1, args.Num2, reply)
 	}
-	log.Println("start rpc server on", l.Addr())
-	addr <- l.Addr().String()
-	server.Accept(l)
+}
+
+func call(registry string) {
+	d := client.NewServersDiscoveryRegistry(registry, 0)
+	xc := client.NewXClient(d, client.RandomSelectMode, nil)
+	defer func() { _ = xc.Close() }()
+	// send request & receive response
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			foo(xc, context.Background(), "call", "Foo.Sum", &Args{Num1: i, Num2: i * i})
+		}(i)
+	}
+	wg.Wait()
+}
+
+func broadcast(registry string) {
+	d := client.NewServersDiscoveryRegistry(registry, 0)
+	xc := client.NewXClient(d, client.RandomSelectMode, nil)
+	defer func() { _ = xc.Close() }()
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			foo(xc, context.Background(), "broadcast", "Foo.Sum", &Args{Num1: i, Num2: i * i})
+			// expect 2 - 5 timeout
+			ctx, _ := context.WithTimeout(context.Background(), time.Second)
+			foo(xc, ctx, "broadcast", "Foo.Sleep", &Args{Num1: i, Num2: i * i})
+		}(i)
+	}
+	wg.Wait()
 }
 
 func main() {
 	log.SetFlags(0)
-	addr := make(chan string)
-	go startServer(addr)
+	registryAddr := "http://localhost:9999/_rpc_/registry"
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go startRegistry(&wg)
+	wg.Wait()
 
-	// in fact, following code is like a simple geerpc client
-	dial, err := client.Dial("tcp", <-addr)
-	if err != nil {
-		log.Fatal("network error:", err)
-	}
-	defer func() {
-		if err := dial.Close(); err != nil {
-			log.Fatal("network error:", err)
-		}
-	}()
+	time.Sleep(time.Second)
+	wg.Add(2)
+	go startServer(registryAddr, &wg)
+	go startServer(registryAddr, &wg)
+	wg.Wait()
 
 	time.Sleep(time.Second * 2)
-	wg := sync.WaitGroup{}
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			args := &Args{Num1: i, Num2: i * i}
-			var reply int
-			if err := dial.Call("Foo.Sum", args, &reply); err != nil {
-				log.Fatal("call Foo.Sum error:", err)
-			}
-			log.Printf("%d + %d = %d", args.Num1, args.Num2, reply)
-		}(i)
-	}
-	wg.Wait()
+	call(registryAddr)
+	broadcast(registryAddr)
 }

@@ -3,13 +3,16 @@ package server
 import (
 	"GoRpc/codec"
 	"GoRpc/service"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Server struct {
@@ -20,7 +23,11 @@ func NewServer() *Server {
 	return &Server{}
 }
 
-var DefaultServer = NewServer()
+var DefaultServer *Server
+
+func init() {
+	DefaultServer = NewServer()
+}
 
 func (s *Server) Accept(lis net.Listener) {
 	for {
@@ -38,9 +45,9 @@ func Accept(lis net.Listener) {
 }
 
 func (s *Server) Register(rcvr interface{}) error {
-	server := service.NewService(rcvr)
-	if _, ok := s.serviceMap.LoadOrStore(server.Name, server); ok {
-		return fmt.Errorf("rpc: service already defined: %v", server.Name)
+	newService := service.NewService(rcvr)
+	if _, ok := s.serviceMap.LoadOrStore(newService.Name, newService); ok {
+		return fmt.Errorf("rpc: service already defined: %v", newService.Name)
 	}
 	return nil
 }
@@ -66,35 +73,35 @@ func (s *Server) findService(serviceMethod string) (svc *service.Service, mType 
 func Register(rcvr interface{}) error { return DefaultServer.Register(rcvr) }
 
 func (s *Server) HandleAccept(conn net.Conn) {
-	log.Println("Server accept conn:", conn)
 	defer func() {
 		err := conn.Close()
 		if err != nil {
-			log.Println("Server conn close err:", err)
+			log.Printf("Server %p conn close err:%s\n", s, err)
 		}
 	}()
 	var option codec.Option
 	if err := json.NewDecoder(conn).Decode(&option); err != nil {
-		log.Println("Server decode option err:", err)
+		log.Printf("Server %p decode option err: %s\n", s, err)
 		return
 	}
 	if option.MagicNumber != codec.MagicNumber {
-		log.Println("Server magic number err")
+		log.Printf("Server %p magic number err\n", s)
 		return
 	}
 	f := codec.NewCodecFuncMap[option.CodecType]
 	if f == nil {
-		log.Println("Server codec type err")
+		log.Printf("Server %p codec type err\n", s)
 		return
 	}
-	s.HandleAcceptWithCodec(f(conn))
+	log.Println(fmt.Sprintf("Server %p accept %+v, opt:%+v", s, conn, option))
+	s.HandleAcceptWithCodec(f(conn), &option)
 
 }
 
-var invaildRequest = struct {
+var invalidRequest = struct {
 }{}
 
-func (s *Server) HandleAcceptWithCodec(cc codec.Codec) {
+func (s *Server) HandleAcceptWithCodec(cc codec.Codec, option *codec.Option) {
 	sending := new(sync.Mutex)
 	wg := new(sync.WaitGroup)
 	for {
@@ -104,10 +111,11 @@ func (s *Server) HandleAcceptWithCodec(cc codec.Codec) {
 				break
 			}
 			request.H.Err = err.Error()
-			s.sendResponse(cc, request.H, invaildRequest, sending)
+			s.sendResponse(cc, request.H, invalidRequest, sending)
 		}
 		wg.Add(1)
-		go s.handleRequest(cc, request, sending, wg)
+		log.Println(fmt.Sprintf("Server %p receive req: %+v %+v", s, request, cc))
+		go s.handleRequest(cc, request, sending, wg, option.HandleTimeOut)
 
 	}
 	wg.Wait()
@@ -118,7 +126,7 @@ func (s *Server) HandleAcceptWithCodec(cc codec.Codec) {
 func (s *Server) readRequestHeader(c codec.Codec) (*codec.Header, error) {
 	var h codec.Header
 	if err := c.ReadHeader(&h); err != nil {
-		log.Println("Server read request header err:", err)
+		log.Printf("Server %p read request header err:%s\n", s, err)
 		return nil, err
 	}
 	return &h, nil
@@ -128,7 +136,7 @@ func (s *Server) sendResponse(cc codec.Codec, h *codec.Header, body interface{},
 	sending.Lock()
 	defer sending.Unlock()
 	if err := cc.Write(h, body); err != nil {
-		log.Println("Server send response err:", err)
+		log.Printf("Server %p send response err: %s\n", s, err)
 	}
 }
 
@@ -140,6 +148,10 @@ func (s *Server) readRequest(cc codec.Codec) (*codec.Request, error) {
 	req := &codec.Request{H: header}
 
 	req.Svc, req.MType, err = s.findService(header.ServiceMethod)
+	if req.MType == nil {
+		log.Printf("Server %p find service err: %+v\n %+v", s, req, header)
+		return req, fmt.Errorf("rpc: can't find method %v", header.ServiceMethod)
+	}
 	if err != nil {
 		return req, err
 	}
@@ -151,20 +163,84 @@ func (s *Server) readRequest(cc codec.Codec) (*codec.Request, error) {
 		argvi = req.Argv.Addr().Interface()
 	}
 	if err := cc.ReadBody(argvi); err != nil {
-		log.Println("Server read request body err:", err)
+		log.Printf("Server %p read request body err:%s\n", s, err)
 		return nil, err
 	}
 	return req, nil
 
 }
 
-func (s *Server) handleRequest(cc codec.Codec, req *codec.Request, sending *sync.Mutex, wg *sync.WaitGroup) {
+func (s *Server) handleRequest(cc codec.Codec, req *codec.Request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
-	err := req.Svc.Call(req.MType, req.Argv, req.Replyv)
-	if err != nil {
-		req.H.Err = err.Error()
-		s.sendResponse(cc, req.H, invaildRequest, sending)
-	} else {
-		s.sendResponse(cc, req.H, req.Replyv.Interface(), sending)
+
+	callChan := make(chan struct{})
+	sentChan := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		err := req.Svc.Call(req.MType, req.Argv, req.Replyv)
+		callChan <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+
+		}
+		if err != nil {
+			req.H.Err = err.Error()
+			s.sendResponse(cc, req.H, invalidRequest, sending)
+		} else {
+			s.sendResponse(cc, req.H, req.Replyv.Interface(), sending)
+		}
+
+		sentChan <- struct{}{}
+	}()
+
+	if timeout == 0 {
+		<-callChan
+		<-sentChan
+		return
+	}
+	select {
+	// handle call timeout
+	case <-time.After(timeout):
+		req.H.Err = fmt.Sprintf("request handle timeout timeout: %s", timeout)
+		s.sendResponse(cc, req.H, invalidRequest, sending)
+	case <-callChan:
+		// wait for send
+		<-sentChan
 	}
 }
+
+/*
+ HTTP
+*/
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "CONNECT" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = fmt.Fprintf(w, "405 must CONNECT\n")
+		return
+	}
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Println("Server hijack", r.RemoteAddr, " err:", err)
+		return
+	}
+	_, _ = fmt.Fprintf(conn, "HTTP/1.0 "+codec.Connected+"\n\n")
+	s.HandleAccept(conn)
+}
+
+func (s *Server) HandleHttp() {
+	http.Handle(codec.DefaultRpcPath, s)
+	log.Println("rpc server defaultRpcPath:", codec.DefaultRpcPath)
+	http.Handle(codec.DefaultDebugPath, debugHttp{s})
+	log.Println("rpc server debug path:", codec.DefaultDebugPath)
+}
+
+func HandleHTTP() {
+	DefaultServer.HandleHttp()
+}
+
+var _ http.Handler = (*Server)(nil)

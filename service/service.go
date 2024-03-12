@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"log"
 	"reflect"
+	"sync"
 	"sync/atomic"
 )
 
@@ -13,6 +14,7 @@ type MethodType struct {
 	ArgType     reflect.Type
 	ReplyType   reflect.Type
 	numberCalls uint64
+	mu          *sync.Mutex
 }
 
 func (m *MethodType) NumberCalls() uint64 {
@@ -76,15 +78,19 @@ func (s *Service) registerMethods() {
 			method:    method,
 			ArgType:   argType,
 			ReplyType: replyType,
+			mu:        &sync.Mutex{},
 		}
-		log.Println(fmt.Sprintf("server : register Service: %s method: %s", s.Name, mName))
+		log.Println(fmt.Sprintf("Service %p : register Service: %s method: %s", s, s.Name, mName))
 	}
 }
 
 func (s *Service) Call(m *MethodType, argv reflect.Value, replyv reflect.Value) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	atomic.AddUint64(&m.numberCalls, 1)
 	f := m.method.Func
 	callReturns := f.Call([]reflect.Value{s.Rcvr, argv, replyv})
+	log.Println(fmt.Sprintf("Service %p call Service: %s.%s", s, s.Name, m.method.Name))
 	if err := callReturns[0].Interface(); err != nil {
 		return err.(error)
 	}
@@ -97,7 +103,7 @@ func NewService(Rcvr interface{}) *Service {
 	s.Typ = reflect.TypeOf(Rcvr)
 	s.Name = reflect.Indirect(s.Rcvr).Type().Name()
 	if !ast.IsExported(s.Name) {
-		log.Fatalf("server: %s is not a valid Service Name", s.Name)
+		log.Fatalf("Service: %s is not a valid Service Name", s.Name)
 	}
 	s.registerMethods()
 	return s

@@ -2,13 +2,18 @@ package client
 
 import (
 	"GoRpc/codec"
+	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
+	"time"
 )
 
 type Call struct {
@@ -29,6 +34,11 @@ type Client struct {
 	pending  map[uint64]*Call
 	closing  bool
 	shutdown bool
+}
+
+type clientResult struct {
+	client *Client
+	err    error
 }
 
 var _ io.Closer = (*Client)(nil)
@@ -58,7 +68,7 @@ func (c *Client) registerCall(call *Call) (uint64, error) {
 		return 0, ErrShutdown
 	}
 	call.Seq = c.seq
-	c.pending[call.Seq] = call
+	c.pending[c.seq] = call
 	c.seq++
 	return call.Seq, nil
 }
@@ -91,6 +101,7 @@ func (c *Client) receive() {
 			break
 		}
 		call := c.removeCall(h.Seq)
+		log.Println(fmt.Sprintf("client %p receive call %p %+v", c, call, call))
 		switch {
 		case call == nil:
 			err = c.cc.ReadBody(nil)
@@ -105,8 +116,8 @@ func (c *Client) receive() {
 			}
 			call.Done <- call
 		}
-
 	}
+	c.terminateCalls(err)
 }
 
 func (c *Client) send(call *Call) {
@@ -144,13 +155,21 @@ func (c *Client) DoCall(serviceMethod string, args interface{}, reply interface{
 		Done:          done,
 	}
 	c.send(call)
+	log.Println(fmt.Sprintf("client send call %+v", call))
 	return call
 
 }
 
-func (c *Client) Call(serviceMethod string, args interface{}, reply interface{}) error {
-	call := <-c.DoCall(serviceMethod, args, reply, make(chan *Call, 1)).Done
-	return call.Error
+func (c *Client) Call(ctx context.Context, serviceMethod string, args interface{}, reply interface{}) error {
+	call := c.DoCall(serviceMethod, args, reply, make(chan *Call, 1))
+	select {
+	case <-ctx.Done():
+		c.removeCall(call.Seq)
+		return errors.New("call failed: " + ctx.Err().Error())
+	case call := <-call.Done:
+		log.Println(fmt.Sprintf("client call result %+v", call))
+		return call.Error
+	}
 }
 
 func NewClient(conn net.Conn, opt *codec.Option) (*Client, error) {
@@ -171,7 +190,7 @@ func NewClient(conn net.Conn, opt *codec.Option) (*Client, error) {
 		opt:      opt,
 		sending:  &sync.Mutex{},
 		mu:       &sync.Mutex{},
-		seq:      1, // 如果seq = 0表示请求失败
+		seq:      1,
 		pending:  make(map[uint64]*Call),
 		shutdown: false,
 	}
@@ -194,21 +213,90 @@ func parseOptions(opts ...*codec.Option) (*codec.Option, error) {
 	return opt, nil
 }
 
-func Dial(network, address string, opts ...*codec.Option) (client *Client, err error) {
+type newClientFunc func(conn net.Conn, opt *codec.Option) (client *Client, err error)
+
+func dialTimeOut(f newClientFunc, network, address string, opts ...*codec.Option) (client *Client, err error) {
 	option, err := parseOptions(opts...)
 	if err != nil {
 		log.Println("parse options err:", err)
 		return nil, err
 	}
-	conn, err := net.Dial(network, address)
+	conn, err := net.DialTimeout(network, address, option.ConnectTimeOut)
 	if err != nil {
 		log.Println("net dial err:", err)
 		return nil, err
 	}
-	defer func() {
-		if client == nil {
-			_ = conn.Close()
+	finish := make(chan struct{})
+
+	ch := make(chan clientResult)
+	go func() {
+		client, err := f(conn, option)
+		select {
+		case <-finish:
+			return
+		default:
 		}
+		ch <- clientResult{client, err}
 	}()
-	return NewClient(conn, option)
+	if option.ConnectTimeOut == 0 {
+		result := <-ch
+		return result.client, result.err
+	}
+	select {
+	case <-time.After(option.ConnectTimeOut):
+		_ = conn.Close()
+		finish <- struct{}{}
+		return nil, fmt.Errorf("dial %s %s connect timeout", network, address)
+	case result := <-ch:
+		if result.err != nil {
+			_ = conn.Close()
+			return nil, result.err
+		}
+		return result.client, result.err
+	}
+
+}
+
+func Dial(network, address string, opts ...*codec.Option) (client *Client, err error) {
+	return dialTimeOut(NewClient, network, address, opts...)
+}
+
+//HTTP part
+
+func NewHttpClient(conn net.Conn, opt *codec.Option) (*Client, error) {
+	_, _ = io.WriteString(conn, fmt.Sprintf("CONNECT %s HTTP/1.0\n\n", codec.DefaultRpcPath))
+
+	// Require successful HTTP response
+	// before switching to RPC protocol.
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	if err == nil && resp.Status == codec.Connected {
+		return NewClient(conn, opt)
+	}
+	if err == nil {
+		err = errors.New("unexpected HTTP response: " + resp.Status)
+	}
+	return nil, err
+}
+
+func DialHTTP(network, address string, opts ...*codec.Option) (client *Client, err error) {
+	return dialTimeOut(NewHttpClient, network, address, opts...)
+}
+
+// XDial calls different functions to connect to  RPC server
+// according the first parameter rpcAddr.
+// rpcAddr is a general format (protocol@addr) to represent a rpc server
+// eg, http@10.0.0.1:7001, tcp@10.0.0.1:9999, unix@/tmp/geerpc.sock
+func XDial(rpcAddr string, opts ...*codec.Option) (*Client, error) {
+	parts := strings.Split(rpcAddr, "@")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("rpc client err: wrong format '%s', expect protocol@addr", rpcAddr)
+	}
+	protocol, addr := parts[0], parts[1]
+	switch protocol {
+	case "http":
+		return DialHTTP("tcp", addr, opts...)
+	default:
+		// else
+		return Dial(protocol, addr, opts...)
+	}
 }
