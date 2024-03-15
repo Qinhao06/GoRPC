@@ -226,9 +226,9 @@ func dialTimeOut(f newClientFunc, network, address string, opts ...*codec.Option
 		log.Println("net dial err:", err)
 		return nil, err
 	}
-	finish := make(chan struct{})
+	finish := make(chan struct{}, 1)
 
-	ch := make(chan clientResult)
+	ch := make(chan clientResult, 1)
 	go func() {
 		client, err := f(conn, option)
 		select {

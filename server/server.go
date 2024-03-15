@@ -175,8 +175,8 @@ func (s *Server) readRequest(cc codec.Codec) (*codec.Request, error) {
 func (s *Server) handleRequest(cc codec.Codec, req *codec.Request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
 
-	callChan := make(chan struct{})
-	sentChan := make(chan struct{})
+	callChan := make(chan struct{}, 1)
+	sentChan := make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
