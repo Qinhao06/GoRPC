@@ -181,13 +181,12 @@ func (s *Server) handleRequest(cc codec.Codec, req *codec.Request, sending *sync
 	defer cancel()
 	go func() {
 		err := req.Svc.Call(req.MType, req.Argv, req.Replyv)
-		callChan <- struct{}{}
 		select {
 		case <-ctx.Done():
 			return
 		default:
-
 		}
+		callChan <- struct{}{}
 		if err != nil {
 			req.H.Err = err.Error()
 			s.sendResponse(cc, req.H, invalidRequest, sending)
